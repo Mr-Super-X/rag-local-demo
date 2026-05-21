@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG 本地 Demo</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="header">
+    <h1>RAG 本地文档问答</h1>
+    <div id="status-bar">
+      <span id="status-indicator" class="status-loading"></span>
+      <span id="status-text">正在加载模型...</span>
+    </div>
+  </header>
+
+  <main id="main">
+    <aside id="sidebar">
+      <div id="upload-area">
+        <label for="file-input" id="upload-btn">上传文档</label>
+        <input type="file" id="file-input" accept=".pdf,.docx,.md,.txt" hidden>
+        <p id="upload-hint">支持 PDF、Word、Markdown、TXT</p>
+        <div id="upload-progress" class="hidden">
+          <div class="progress-bar"><div id="progress-fill"></div></div>
+          <span id="progress-text"></span>
+        </div>
+        <div id="upload-spinner" class="spinner hidden"></div>
+      </div>
+
+      <div id="doc-list">
+        <h3>已上传文档</h3>
+        <ul id="documents"></ul>
+        <p id="no-docs">暂无文档，请先上传</p>
+      </div>
+    </aside>
+
+    <section id="chat-area">
+      <div id="chat-messages"></div>
+      <div id="chat-empty">
+        <p>上传文档后，在此提问</p>
+      </div>
+      <div id="chat-input-area">
+        <textarea id="chat-input" placeholder="输入问题..." rows="2" disabled></textarea>
+        <button id="send-btn" disabled>发送</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script type="module" src="/ui.js"></script>
+<script type="module" src="/upload.js"></script>
+<script type="module" src="/chat.js"></script>
+</body>
+</html>

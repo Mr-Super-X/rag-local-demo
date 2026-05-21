@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.omc/
+data/
+models/
+bin/
+*.exe
+*.gguf
+*.ps1
