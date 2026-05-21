@@ -7,6 +7,9 @@
 
 ## 目录
 
+0. [RAG 总览——这个系统在做什么](#01-rag-是怎么工作的)
+   - [技术选型——为什么选这些](#02-技术选型为什么选这些)
+   - [系统架构——各组件如何协作](#03-系统架构各组件如何协作)
 1. [准备环境](#一准备环境)
 2. [创建项目骨架](#二创建项目骨架)
 3. [类型定义](#三类型定义)
@@ -22,10 +25,206 @@
 13. [模型下载脚本](#十三模型下载脚本)
 14. [前端界面](#十四前端界面)
 15. [启动测试](#十五启动测试)
+16. [进阶：从 Demo 到生产级 RAG 系统](#十六进阶从-demo-到生产级-rag-系统)
 
 ---
 
 ## 一、准备环境
+
+### 0.1 RAG 是怎么工作的？
+
+在动手写代码之前，先理解整个系统在做什么。下面这张图就是你将要搭的东西：
+
+```
+┌─ 文档入库（离线）─────────────────────────────────────────┐
+│                                                         │
+│  你的 PDF/Word/MD → 解析为纯文本 → 切成小块(Chunk)       │
+│    → 每块用 embedding 模型转为 384 维向量 → 存入 LanceDB │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─ 问答查询（在线）─────────────────────────────────────────┐
+│                                                         │
+│  你输入问题 → 问题也转为 384 维向量                       │
+│    → 在 LanceDB 中搜最相似的 5 个文档块                    │
+│    → 把文档块 + 问题拼成 Prompt → 发给本地 LLM           │
+│    → LLM 逐字输出回答 → 前端实时渲染                      │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+整个系统分为 15 个模块，你会按这个顺序逐个实现：
+
+| 章节 | 模块 | 在系统里的角色 |
+|------|------|-------------|
+| 二~三 | 项目骨架 + 类型 | 地基——定义"这个项目是什么"和"数据长什么样" |
+| 四~五 | 解析器 + 切分器 | 入库管线前半段——把文件变成文本块 |
+| 六~八 | 向量化 + 向量库 + 检索 | RAG 核心——语义搜索 |
+| 九~十 | LLM 模块 + Prompt | 回答生成——调用 AI 写出答案 |
+| 十一~十二 | API 路由 + 服务器 | 桥梁——把前端和后端连起来 |
+| 十三 | 下载脚本 | 准备——下载 AI 模型和运行环境 |
+| 十四 | 前端界面 | 门面——用户看到和操作的东西 |
+| 十五 | 启动测试 | 验证——一切就绪，跑起来！ |
+
+别担心看起来很复杂。每个模块平均只有 60~150 行代码，15 个模块加起来约 1500 行。一章一章来，半天就能写完。
+
+---
+
+### 0.2 技术选型——为什么选这些
+
+在动手写代码之前，你可能好奇：外面那么多 AI 工具和框架，为什么本教程选的是这些？
+
+**选型原则**：针对 Demo 场景，我们追求三个目标——**零外部服务依赖**（不需要装数据库、不需要注册 API）、**纯 JS/TS 生态**（一个语言搞定前后端+AI）、**总模型体积 ≤ 500MB**（下载快、CPU 能跑）。
+
+每个组件的决策过程：
+
+#### Embedding 模型：Xenova/all-MiniLM-L6-v2
+
+| 候选 | 维度 | 大小 | 为什么选/不选 |
+|------|------|------|-------------|
+| **all-MiniLM-L6-v2** ✅ | 384 | 80MB | 纯 JS（transformers.js），CPU 友好，足够 Demo 使用 |
+| BGE-large-zh-v1.5 | 1024 | 1.3GB | 中文效果更好但太大，且 transformers.js 不支持 |
+| text2vec-large-chinese | 1024 | 1.2GB | 同上，模型体积超过 500MB 总预算 |
+| OpenAI text-embedding-3-small | 1536 | 0 (API) | 需要 API Key，违反"纯本地"原则 |
+
+**决策理由**：all-MiniLM-L6-v2 是唯一一个能在 **Node.js 纯 CPU 环境**下运行、体积可控、且 `@xenova/transformers` 官方支持的 embedding 模型。384 维对 Demo 场景完全够用。
+
+#### 向量数据库：LanceDB
+
+| 候选 | 部署方式 | 为什么选/不选 |
+|------|---------|-------------|
+| **LanceDB** ✅ | 嵌入式（npm 包，零配置） | 本地文件存储，不需要安装任何服务 |
+| ChromaDB | Python 嵌入式 | Python only，Node.js 只能用 HTTP 客户端——多一个服务要启动 |
+| Qdrant | 独立服务 | 需要 Docker 或手动安装，太重 |
+| Milvus | 分布式集群 | 企业级方案，Demo 严重过度工程 |
+| Pinecone | 云服务 | 需要 API Key + 联网 |
+
+**决策理由**：LanceDB 是唯一一个"npm install 就能用"的向量数据库——不需要 Docker、不需要启动额外进程、数据直接存本地文件。对 Demo 来说零运维成本是最重要的。
+
+#### LLM 运行时：llama.cpp (llama-server.exe)
+
+| 候选 | 运行方式 | 为什么选/不选 |
+|------|---------|-------------|
+| **llama.cpp** ✅ | 独立可执行文件（预编译 .exe） | 无需 C++ 编译器，15MB 下载即用，CPU 高效推理 |
+| Ollama | 独立安装 | 成熟的本地 LLM 工具，但需要用户额外下载安装 .msi |
+| node-llama-cpp | npm 原生插件 | 需 Visual Studio Build Tools（6-8GB），违反轻量原则 |
+| @xenova/transformers | npm 包纯 JS | 文本生成模型质量差（flan-t5），LLM 回答不可用 |
+| vLLM | GPU 服务 | 企业级 GPU 推理框架，Demo 不需要 |
+
+**决策理由**：llama.cpp 提供预编译的 Windows 二进制包（一个 .zip，解压即用），管理为子进程，通过 HTTP API 通信。既避免了 C++ 编译的复杂性，又保证了 LLM 推理质量。**进程隔离**——Node.js 崩了 LLM 不受影响，反之亦然。
+
+#### LLM 模型：Qwen2.5-0.5B-Instruct (GGUF, Q4_K_M 量化)
+
+| 候选 | 大小 | 为什么选/不选 |
+|------|------|-------------|
+| **Qwen2.5-0.5B** ✅ | ~400MB (Q4) | 500MB 预算内，中文支持好，指令遵循能力基础可用 |
+| Qwen2.5-1.5B | ~1.1GB (Q4) | 质量好很多但超出体积预算 |
+| Llama-3.2-1B | ~700MB (Q4) | 英文为主，中文支持弱 |
+| Gemma-2-2B | ~1.7GB (Q4) | 太大 |
+
+**决策理由**：0.5B 是能在 500MB 预算内找到的唯一一个有较好中文支持的指令微调模型。Q4_K_M 量化平衡了体积和精度。回答质量确实有限，但对 RAG 流程演示来说——检索到相关段落 + 基于段落生成回答——完全够用。**用户可随时换成更大的模型。**
+
+#### 文档解析：pdf-parse / mammoth / marked
+
+| 组件 | 用途 | 为什么选 |
+|------|------|---------|
+| `pdf-parse` | PDF → 纯文本 | 纯 JS 实现，零系统依赖（不需要装 poppler/ghostscript） |
+| `mammoth` | Word (.docx) → 纯文本 | 纯 JS，专注提取文字，比 word-extractor 更准确 |
+| `marked` | Markdown → HTML → 纯文本 | 也在前端复用（Markdown 渲染），一份依赖两处使用 |
+
+#### 前端：纯 HTML/CSS/JS（ES Modules）
+
+| 候选 | 为什么选/不选 |
+|------|-------------|
+| **纯 HTML/CSS/JS** ✅ | 零构建工具，零框架依赖，一个 `index.html` + 三个 `.js` 文件 |
+| React / Vue | 需要打包工具（Vite/Webpack），增加几十个依赖，Demo 过度工程 |
+| htmx | 好选择但不是教程目标——我们想展示手写 SSE 流式处理的过程 |
+
+---
+
+### 0.3 系统架构——各组件如何协作
+
+在写代码之前，先在脑中建立一个完整的架构图。下面这张图就是你要搭建的东西：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                 Browser (localhost:3000)                 │
+│  ┌────────────┐  ┌───────────────┐  ┌───────────────┐  │
+│  │  upload.js │  │    ui.js      │  │   chat.js     │  │
+│  │  文件上传   │  │  DOM + 状态   │  │  SSE流式对话   │  │
+│  └─────┬──────┘  └───────────────┘  └───────┬───────┘  │
+│        │              ↑    ↑               │           │
+└────────┼──────────────┼────┼───────────────┼───────────┘
+         │              │    │               │
+         │   POST       │    │    POST       │
+         │  /api/upload │    │   /api/chat   │
+         ▼              │    │               ▼
+┌────────────────────────┼────┼───────────────────────────┐
+│               Express.js Server (TypeScript)            │
+│                        │    │                           │
+│  ┌─────────────────────┼────┼────────────────────────┐  │
+│  │    upload.ts        │    │       chat.ts          │  │
+│  │  ① 接收文件          │    │   ① 接收问题            │  │
+│  │  ② parser.ts        │    │   ② retriever.ts       │  │
+│  │     ↓               │    │      ↓                 │  │
+│  │  ③ chunker.ts       │    │   ③ buildChatMessages  │  │
+│  │     ↓               │    │      ↓                 │  │
+│  │  ④ embedder.ts      │    │   ④ generator.ts       │  │
+│  │     ↓               │    │      ↓                 │  │
+│  │  ⑤ vector-db.ts     │    │   ⑤ SSE 流式返回        │  │
+│  └─────────┬───────────┘    └────────────────────────┘  │
+│            │                                            │
+│  ┌─────────▼──────────────────────────────────────┐     │
+│  │          @lancedb/lancedb                       │     │
+│  │   Table: chunks (id, text, vector 384维,        │     │
+│  │   docId, docName, chunkIndex, createdAt)        │     │
+│  └────────────────────────────────────────────────┘     │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │      llama-server.exe (子进程, port 8080)       │    │
+│  │   模型: qwen2.5-0.5b-q4_k_m.gguf (~400MB)      │    │
+│  │   接口: /v1/chat/completions (OpenAI 兼容)       │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  ┌──────────────────────┐  ┌──────────────────────────┐ │
+│  │  data/uploads/       │  │  models/                  │ │
+│  │   (原始文件)          │  │  ├── embedding/           │ │
+│  │                      │  │  │   all-MiniLM-L6-v2/    │ │
+│  │  data/lancedb/       │  │  │   (~80MB, 4 文件)      │ │
+│  │   (向量索引)          │  │  └── llm/                 │ │
+│  │                      │  │      qwen2.5-0.5b.gguf    │ │
+│  └──────────────────────┘  └──────────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+```
+
+**两条核心数据流：**
+
+**🔵 文档入库（上传时）**
+```
+浏览器 → Express → multer 接收文件
+  → parser.ts 解析（PDF/Word/MD → 纯文本）
+  → chunker.ts 切分（递归字符切分，512 token/块）
+  → embedder.ts 向量化（384 维向量，每块一条）
+  → vector-db.ts 批量写入 LanceDB
+  → 返回 { docId, docName, chunkCount }
+```
+
+**🟢 智能问答（提问时）**
+```
+浏览器 → Express → chat.ts 接收问题
+  → embedder.ts 把问题转成 384 维向量
+  → retriever.ts 在 LanceDB 中搜 Top-5 最相似片段
+    → 过滤相似度 < 0.5 的低质结果
+  → prompt.ts 拼接 Prompt（system + context + question）
+  → generator.ts 调用 llama-server /v1/chat/completions (SSE 流式)
+  → 逐 token 通过 SSE 推送回浏览器
+  → chat.js 逐字渲染 + marked 渲染 Markdown
+  → 回答完成后展示来源引用（文件名 + 段落）
+```
+
+**你接下来要做的事**：按章节顺序逐个实现图中的模块。从 `types.ts`（定义数据形状）→ `parser.ts`（解析文档）→ `chunker.ts`（切分）→ `embedder.ts`（向量化）→ `vector-db.ts`（存储）→ `retriever.ts`（检索）→ `generator.ts`（LLM）→ `prompt.ts`（模板）→ API 路由 → `server.ts`（入口）→ `setup.ts`（下载）→ 前端界面。一章一个模块，写完即用。
+
+---
 
 ### 1.1 你需要安装
 
@@ -132,6 +331,21 @@ mkdir models\embedding
 mkdir models\llm
 ```
 
+### 2.3.5 创建 .gitignore
+
+新建 `.gitignore`，避免把几百 MB 的模型文件和依赖提交到 git：
+
+```
+node_modules/
+dist/
+data/
+models/
+bin/
+*.exe
+*.gguf
+*.ps1
+```
+
 ### 2.4 安装依赖
 
 ```bash
@@ -139,7 +353,7 @@ npm install --ignore-scripts
 npm rebuild sharp onnxruntime-node
 ```
 
-> **为什么分两步**：`sharp` 包安装时需要从 GitHub 下载文件，网络可能超时。`--ignore-scripts` 先跳过所有原生编译，再用 `rebuild` 单独处理。
+> **为什么分两步 + 为什么 rebuild sharp**：`sharp` 是 `@xenova/transformers` 的间接依赖（处理图片用的，不在你的 package.json 里），它安装时需要从 GitHub 下载原生二进制文件，网络可能超时导致整体 `npm install` 失败。`--ignore-scripts` 先跳过所有原生编译，再用 `rebuild` 单独处理这两个需要原生模块的包。
 
 ---
 
@@ -609,7 +823,14 @@ export async function startGenerator(): Promise<void> {
 export function stopGenerator(): void {
   if (childProcess) {
     childProcess.kill('SIGTERM');
-    setTimeout(() => { if (childProcess) childProcess.kill('SIGKILL'); }, 5000);
+    const forceTimeout = setTimeout(() => {
+      if (childProcess) { childProcess.kill('SIGKILL'); }
+    }, 5000);
+    childProcess.on('exit', () => {
+      clearTimeout(forceTimeout);
+      childProcess = null;
+      isLoaded = false;
+    });
   }
 }
 
@@ -669,7 +890,9 @@ export async function generateStream(
 }
 ```
 
-**设计要点**：LLM 不是作为一个库引入的，而是作为一个**独立进程**管理的。`llama-server.exe` 是一个完整的 HTTP 服务器，暴露了和 OpenAI 兼容的 `/v1/chat/completions` 接口。这样做的好处是进程隔离——Node.js 挂了 LLM 不受影响，反之亦然。
+**设计要点**：LLM 不是作为一个库引入的，而是作为一个**独立进程**管理的。`llama-server.exe` 是一个完整的 HTTP 服务器，暴露了和 OpenAI 兼容的 `/v1/chat/completions` 接口——进程隔离，Node.js 挂了 LLM 不受影响。
+
+> **关于 GGUF**：`qwen2.5-0.5b-q4_k_m.gguf` 是一种模型文件格式。GGUF 文件的前 4 个字节是固定的 `0x47 0x47 0x55 0x46`（ASCII 的 "GGUF"），叫做"魔数"（magic number）。setup 脚本下载完模型后会校验这 4 个字节，确保文件没有损坏——如果网络传输中断导致文件不完整，魔数不对，就能立即发现。
 
 ---
 
@@ -967,7 +1190,7 @@ import express from 'express';
 import path from 'path';
 
 // 清除系统代理环境变量（避免 transformers.js 下载时走死代理）
-for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy']) {
+for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy', 'CDNURL', 'MIRROR']) {
   process.env[v] = '';
 }
 
@@ -1042,7 +1265,7 @@ import http from 'http';
 import { execSync } from 'child_process';
 
 // 清代理，直连下载
-for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy']) {
+for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy', 'CDNURL', 'MIRROR']) {
   process.env[v] = '';
 }
 
@@ -1277,6 +1500,13 @@ body {
 }
 #upload-btn:hover { background: var(--primary-hover); }
 #upload-hint { font-size: 0.75rem; color: var(--text-secondary); margin-top: 8px; }
+
+#upload-progress { margin-top: 12px; }
+.progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+#progress-fill { height: 100%; width: 0; background: var(--primary); transition: width 0.2s; }
+#progress-text { font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px; display: block; }
+.spinner { width: 24px; height: 24px; border: 3px solid var(--border); border-top: 3px solid var(--primary); border-radius: 50%; animation: spin 0.6s linear infinite; margin: 12px auto; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .hidden { display: none !important; }
 
@@ -1599,7 +1829,7 @@ async function sendMessage() {
 ```bash
 # 1. 安装依赖
 npm install --ignore-scripts
-npm rebuild sharp onnxruntime-node
+npm rebuild sharp onnxruntime-node     # sharp 是 transformers 的间接依赖，见第二节说明
 
 # 2. 下载模型（首次需联网，~480MB）
 npm run setup
@@ -1608,9 +1838,356 @@ npm run setup
 npm start
 ```
 
-打开浏览器，访问 **http://localhost:3000**。
+打开浏览器，输入 **http://localhost:3000**。你会看到：
 
-上传一个文档，问它一个问题。你会看到 AI 逐字输出回答，答完还能展开引用来源，看到它具体引用了哪些段落。
+1. 顶部状态栏：「模型就绪」（绿色圆点）
+2. 左侧有上传按钮和文档列表
+3. 右侧有聊天输入框
+
+### 试试效果
+
+- **上传一个文档**：点击「上传文档」，选一个 PDF/Word/MD/TXT 文件。看到 "已添加: xxx (N 片段)" 表示成功
+- **问一个问题**：在输入框输入问题，按 Enter。AI 会逐字输出回答
+- **查看来源**：回答下方展开「引用来源」，可以看到 AI 引用了哪些文档段落
+- **跨文件提问**：上传第二个文档，再问一个涉及两个文档的问题
+- **删除文档**：点击文档名右侧的 ×
+
+### 预期看到的启动日志
+
+当一切正常时，`npm start` 的输出应该是：
+
+```
+[Server] 加载 Embedding 模型...
+[Embedding] 模型加载完成 (本地): Xenova/all-MiniLM-L6-v2
+[LLM] 启动 llama-server...
+[LLM] llama-server 就绪
+=== RAG 本地 Demo 已启动 ===
+访问: http://localhost:3000
+==========================
+```
+
+### 常见启动问题
+
+| 现象 | 可能原因 | 解决 |
+|------|---------|------|
+| `Cannot find module sharp` | sharp 原生模块没构建 | `npm rebuild sharp onnxruntime-node` |
+| `[Embedding] 加载失败` | 模型文件路径不对或缺失 | 确认 `models/embedding/Xenova/all-MiniLM-L6-v2/` 下有 4 个文件 |
+| `gguf_init_from_file_ptr: failed to read magic` | 模型文件损坏（0 字节） | 删除 `models/llm/*.gguf`，重新 `npm run setup` |
+| `端口 3000 已被占用` | 3000 端口有别的程序在用 | `set PORT=8080 && npm start` |
+| `ECONNREFUSED 127.0.0.1:443` | 系统代理干扰了网络请求 | 已通过 `process.env` 置空处理，重启即可 |
+| 上传后"无法提取文本内容" | PDF 是扫描版（图片） | 换用可选择文字的 PDF |
+
+---
+
+## 十六、进阶：从 Demo 到生产级 RAG 系统
+
+你已经亲手搭了一个能跑的 RAG。但下面这个问题值得思考：
+
+> 如果要把这个 Demo 变成公司内部 100 人每天使用的知识库系统，哪些地方要改？
+
+本章从**技术选型**的角度，逐层对比 Demo 方案和生产方案的差异，并给出推荐架构。
+
+---
+
+### 16.1 升级路线总览
+
+```
+Demo 方案                              生产方案
+───────                               ──────
+all-MiniLM-L6-v2 (80MB, 384维)  →   BGE-large-zh-v1.5 (1.3GB, 1024维)
+LanceDB 嵌入式                     →   Milvus / Qdrant 分布式向量库
+Qwen2.5-0.5B (本地 CPU)           →   Qwen2.5-14B / DeepSeek-V3 (GPU 集群)
+递归字符切分                       →   语义切分 + 父子文档索引
+无重排序                           →   BGE-Reranker-v2-m3 精排
+单进程（Express + 全部模块）        →   微服务 + 消息队列 + 对象存储
+```
+
+核心矛盾：**检索质量、吞吐量、可维护性 三者不可兼得，Demo 优化了"简单"，生产要优化另外两个。**
+
+---
+
+### 16.2 Embedding 模型选型
+
+这是 RAG 系统**最重要的决策**——检索质量的上限由 embedding 模型决定。
+
+| 模型 | 维度 | 大小 | 中文效果 | 适用场景 |
+|------|------|------|---------|---------|
+| all-MiniLM-L6-v2 | 384 | 80MB | 一般 | Demo、英文为主的小项目 |
+| BGE-large-zh-v1.5 | 1024 | 1.3GB | **优秀** | 中文知识库首选 |
+| text2vec-large-chinese | 1024 | 1.2GB | 优秀 | 中文语义相似度任务 |
+| multilingual-e5-large | 1024 | 2.2GB | 优秀 | 多语言混合场景 |
+| BGE-M3 | 1024 | 2.2GB | 优秀 | 多语言 + 支持稀疏+稠密混合检索 |
+
+**选型原则：**
+- **维度越高，信息量越大**——1024 维比 384 维多存了近 3 倍的语义信息，但检索稍慢、存储稍大
+- **中文场景优先选 BGE 系列**——BAAI（智源研究院）在中文 embedding 上投入了大量训练资源
+- **不要频繁换模型**——每次换 embedding 模型都需要**全量重新入库**（存量向量的维度/语义空间不同）
+
+> 一个常见误区：以为 embedding 模型越大越好。实际上 1024 维的 BGE-large 在很多中文检索任务上已经接近更大模型的水平，再往上边际收益递减。**生产环境优先保证稳定性，其次才是追新模型。**
+
+---
+
+### 16.3 向量数据库选型
+
+向量库是 RAG 的"搜索引擎"。Demo 用 LanceDB（嵌入式，单文件），到生产环境需要考量以下维度：
+
+| | LanceDB | Milvus | Qdrant | Weaviate | Elasticsearch |
+|---|---|---|---|---|---|
+| 部署方式 | 嵌入式 | 分布式集群 | 单机/集群 | 单机/集群 | 分布式集群 |
+| 向量检索 | ✅ | ✅ | ✅ | ✅ | ✅ (8.x+) |
+| 标量过滤 | 基础 | 强大 | 强大 | 强大 | 极强 |
+| 混合检索 | ❌ | ✅ 稠密+稀疏 | ❌ | ✅ BM25+向量 | ✅ |
+| 多租户 | ❌ | ✅ Partition Key | ✅ | ✅ | ✅ |
+| 运维复杂度 | 零 | 高 | 中 | 中 | 高 |
+| 适用规模 | < 10 万条 | 亿级 | 百万~千万级 | 百万~亿级 | 亿级 |
+
+**选型决策树：**
+
+```
+你的场景是？
+├── 个人项目 / PoC → LanceDB（零运维，五分钟上线）
+├── 团队内部知识库（<100人，文档量可控）
+│   └── Qdrant（单机部署，Rust 实现，内存效率高）
+├── 企业级知识中台（多部门，海量文档，高并发）
+│   └── Milvus（分布式架构，GPU 加速索引构建，云原生）
+└── 已有 Elasticsearch 基础设施
+    └── ES 8.x+ 直接加向量（不用引入新组件）
+```
+
+**关键决策点：**
+- **混合检索（Hybrid Search）** ：纯向量检索有时会漏掉精确关键词匹配。比如搜"2025 年财报"，向量更关注语义（"年度财务报告"），但用户可能想要包含"2025"这个精确数字的段落。Milvus 和 Weaviate 支持稠密（dense）+ 稀疏（sparse）混合检索，能同时覆盖语义和关键词。
+- **多租户**：如果知识库要服务多个部门且数据隔离，必须选支持 Partition Key 的库（Milvus、Qdrant），否则需要为每个租户建独立表，查询管理复杂。
+- **标量过滤**：生产环境常见的需求——"只搜最近 30 天的合同"、"只搜技术部的文档"。向量库需要在向量检索前先按元数据筛选，差的标量过滤实现会导致全表扫描。
+
+---
+
+### 16.4 LLM 选型
+
+Demo 用 Qwen2.5-0.5B（0.5B 参数），它能跑，但回答质量有限。生产级 RAG 对 LLM 的要求不同：
+
+| 要求 | 原因 |
+|------|------|
+| **指令遵循能力** | RAG 输出必须严格基于 context，不能编造——小模型在这方面表现差 |
+| **上下文窗口** | 检索到的 chunk 越多，需要越大的上下文窗口来容纳 |
+| **推理速度** | 生产环境有并发用户，需要合理的 token 生成速度 |
+| **中文能力** | 如果是中文知识库，要求模型中文预训练充分 |
+
+**选型对比：**
+
+| 模型 | 参数量 | 所需显存 | RAG 适用性 | 部署方式 |
+|------|--------|---------|-----------|---------|
+| Qwen2.5-0.5B | 0.5B | CPU | ❌ Demo 用 | llama.cpp CPU |
+| Qwen2.5-7B-Instruct | 7B | ~16GB | ✅ 适合 | vLLM / Ollama |
+| Qwen2.5-14B-Instruct | 14B | ~32GB | ✅ 更佳 | vLLM / TGI |
+| Qwen2.5-72B-Instruct | 72B | ~160GB | ✅ 最佳 | vLLM (多卡) |
+| DeepSeek-V3 | 671B MoE | ~40GB (激活) | ✅ 极佳 | SGLang / vLLM |
+| GPT-4o / Claude (API) | — | 0 (云端) | ✅ | HTTP API |
+
+**部署框架选型：**
+
+| 框架 | 适用场景 | 优势 |
+|------|---------|------|
+| Ollama | 单机、开发测试 | 一行命令启动，自动下载模型 |
+| vLLM | 生产环境 | PagedAttention 显存管理、连续批处理、高吞吐 |
+| llama.cpp | CPU / 边缘设备 | 无需 GPU，量化支持最好 |
+| SGLang | 高并发 | RadixAttention，比 vLLM 快 30%+（某些场景） |
+
+**推荐路线：** 7B 模型 + vLLM 部署，是生产环境 RAG 场景的"甜蜜点"——指令遵循能力够用、单卡可跑、推理速度可接受。
+
+---
+
+### 16.5 文档解析
+
+Demo 的 `pdf-parse` 只能处理简单 PDF（单栏、纯文字）。真实世界的 PDF 远比这复杂：
+
+| 真实场景 | Demo 能处理？ | 生产方案 |
+|---------|-------------|---------|
+| 双栏论文 | ❌ 读取顺序混乱 | Unstructured.io 的 `detect_document_type` |
+| 含表格的 PDF | ❌ 表格变乱码 | LlamaParse / MinerU ——识别表格结构 |
+| 扫描件 | ❌ 直接报错 | OCR（PaddleOCR / Tesseract）→ 转文字 |
+| PPT/Excel | ❌ 不支持 | Unstructured（支持 20+ 格式） |
+| 图片里的文字 | ❌ 不支持 | 多模态模型（GPT-4V / Qwen-VL）提取 |
+
+**生产环境推荐的文档处理流水线：**
+
+```
+原始文件 → 格式检测 → 根据类型分流：
+  ├── 可提取文字 PDF → Unstructured / MinerU（保留段落、表格、标题结构）
+  ├── 扫描件 / 图片   → OCR (PaddleOCR) → 文字提取
+  ├── Office 文档     → Unstructured / python-docx
+  └── 网页           → trafilatura（提取正文，去掉导航栏/广告）
+→ 统一输出 Markdown 格式（保留标题层级、表格、列表）→ 进入切分流程
+```
+
+重要原则：**文档解析的输出尽可能保留结构化信息（Markdown 格式），而不是压平成纯文本。** 标题层级（`#`、`##`）能帮助分块器在自然边界切分；表格保留结构能让 LLM 正确理解数据。
+
+---
+
+### 16.6 检索策略升级
+
+Demo 用了最简单的检索方式：向量相似度 Top-5 + 固定阈值。生产环境通常会叠加多个策略：
+
+**① 混合检索（Hybrid Search）**
+
+```
+向量检索（语义相似）          关键词检索（BM25 / TF-IDF）
+       │                              │
+       └──────────┬───────────────────┘
+                  ▼
+          结果融合（RRF / 加权求和）
+                  │
+                  ▼
+            最终候选列表
+```
+
+BM25 擅长匹配专有名词、编号、日期；向量检索擅长匹配同义表达。两者互补。
+
+**② 重排序（Reranking）**
+
+```
+向量检索召回 Top-20 → Cross-Encoder Reranker 精排 → 取 Top-5
+```
+
+向量模型是"双塔"架构（query 和 doc 分开编码），速度快但精度有限。Cross-Encoder（如 BGE-Reranker-v2-m3）把 query 和 doc 拼在一起打分，精度高但慢——所以只在 Top-K 候选上做重排。
+
+> 一个直观的类比：向量检索像"海选"（快速筛出 20 个候选人），Reranker 像"面试"（对每人仔细评估）。
+
+**③ 多路召回（Multi-Path Retrieval）**
+
+```
+用户问题 → 同时走三条路：
+  ├── 稠密向量检索（语义匹配）
+  ├── 稀疏向量/BM25（关键词匹配）
+  └── 问题改写后的二次检索（换个问法再搜一次）
+→ 合并去重 → Reranker 精排 → 最终结果
+```
+
+**④ 小→大文档索引（Small-to-Big Retrieval）**
+
+一个常见困境：chunk 太小（丢了上下文），chunk 太大（检索不精准）。
+
+解决思路：**用小块做检索，用大块喂 LLM。**
+
+```
+索引时：
+  文档 → 切成小 chunk (200 token) → embedding → 存入向量库
+            ↓
+        同时也存"父文档"引用（该小 chunk 所在的原始段落/章节）
+
+检索时：
+  用小 chunk 向量匹配 → 找到相关小块
+    → 取对应的大块（完整的段落，500-1000 token）→ 喂给 LLM
+```
+
+这样既保证了检索颗粒度，又保证了 LLM 看到足够的上下文。
+
+---
+
+### 16.7 生产级架构图
+
+综合以上选型，一个**企业级 RAG 知识库系统**的推荐架构：
+
+```
+                        ┌──────────────┐
+                        │   用户/前端   │
+                        └──────┬───────┘
+                               │
+                               ▼
+                    ┌──────────────────┐
+                    │   API Gateway    │  ← 鉴权、限流、路由
+                    │  (Kong / Nginx)  │
+                    └────────┬─────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+     ┌────────────┐  ┌────────────┐  ┌────────────┐
+     │  上传服务   │  │  检索服务   │  │   LLM 服务  │
+     │            │  │            │  │            │
+     │ 文件→解析   │  │ query→向量  │  │ Prompt→生成 │
+     │ →切分→入库  │  │ →检索→重排  │  │ →流式返回   │
+     └─────┬──────┘  └─────┬──────┘  └──────┬─────┘
+           │               │                │
+           ▼               ▼                │
+    ┌──────────┐   ┌──────────────┐         │
+    │ 对象存储  │   │  向量数据库   │         │
+    │  (MinIO) │   │ (Milvus 集群) │         │
+    └──────────┘   └──────────────┘         │
+           │               │                │
+           └───────┬───────┘                │
+                   │                        │
+                   ▼                        ▼
+          ┌────────────────┐      ┌─────────────────┐
+          │   消息队列      │      │  模型推理集群    │
+          │ (Redis / Kafka) │      │ vLLM + 7B 模型  │
+          └────────────────┘      │ (GPU: A10 x2)   │
+                                  └─────────────────┘
+```
+
+**各组件职责：**
+
+| 组件 | 职责 | 为什么需要 |
+|------|------|-----------|
+| API Gateway | 统一入口、身份认证、速率限制 | 多服务需要统一的流量控制层 |
+| 上传服务 | 文档接收→解析→切分→向量化→入库 | 这是一个重 CPU 操作，需独立扩缩 |
+| 检索服务 | query embedding→向量搜索→重排 | 无状态，最容易水平扩展 |
+| LLM 服务 | Prompt 组装→调用推理引擎→流式返回 | 与 GPU 资源强绑定，独立部署便于管理 |
+| 对象存储 (MinIO) | 原始文档持久化 | 上传服务挂了文档不丢 |
+| 消息队列 | 异步处理大文档入库 | 100 页 PDF 的解析+向量化可能耗时 2 分钟，不能让用户干等 |
+| 模型推理集群 | GPU 上的 LLM 推理 | 与业务服务解耦，可独立升级模型 |
+
+**这条流水线的实际运转流程：**
+
+1. 用户上传一份 50 页的 PDF → API Gateway 鉴权 → 转发到上传服务
+2. 上传服务把原始文件存到 MinIO，发一条消息到 Redis："有新文档，ID=xxx，路径=xxx"
+3. Worker 消费消息 → 读文件 → 解析 → 切分 → 向量化 → 批量写入 Milvus
+4. 处理完成后标记文档为"可检索"
+5. 用户提问 → 检索服务 embedding → Milvus 搜索 + Reranker 精排 → Prompt 拼接
+6. Prompt → LLM 服务 → vLLM 推理 → 流式 SSE → 用户看到逐字输出
+
+---
+
+### 16.8 生产环境额外考量
+
+**评估体系：**
+
+Demo 靠"感觉"判断好不好，生产环境需要量化指标：
+
+| 指标 | 衡量什么 | 计算方式 |
+|------|---------|---------|
+| Hit Rate | 检索到的 chunk 里有没有正确答案 | 正确的检索次数 / 总查询次数 |
+| MRR (Mean Reciprocal Rank) | 正确答案排在第几位 | 排名倒数 1/rank 的均值 |
+| NDCG@10 | 前 10 个结果的排序质量 | 归一化折损累计增益 |
+| 答案准确率 | LLM 回答是否正确 | 需要人工标注或用 LLM-as-Judge |
+| 幻觉率 | LLM 是否编造了文档中没有的信息 | 答案中断言不在 source 中的比例 |
+| 首字延迟 | 用户感知的响应速度 | 请求发出 → 第一个 token 返回的时间 |
+| 吞吐量 | 系统能同时处理多少请求 | 并发下的 QPS + P99 延迟 |
+
+**RAG 评估数据集构建：**
+
+```
+准备 100 个真实用户问题 → 人工标注每个问题的"正确答案所在段落"
+  → 跑一遍检索 → 看标注的段落是否在 Top-K 里 → 计算 Hit Rate 和 MRR
+```
+
+**安全与合规：**
+
+- **文档权限**：不同部门的知识库要隔离（向量库多租户 + API 层权限校验）
+- **敏感信息**：上传的文档可能含身份证号、手机号 → 入库前自动脱敏
+- **审计日志**：谁在什么时间问了什么问题、看了哪些文档 → 需完整记录
+- **内容安全**：用户输入和 LLM 输出都需要过内容审核（涉政、涉黄检测）
+
+**监控与运维：**
+
+```
+核心监控看板：
+├── 检索服务：QPS、P99 延迟、Hit Rate 趋势（每周计算）
+├── LLM 服务：首 Token 延迟、tokens/s 吞吐、GPU 利用率、队列长度
+├── 上传服务：处理成功率、平均单文档处理时长、失败重试次数
+└── 基础设施：Milvus 内存/磁盘、MinIO 存储增长趋势、消息队列积压
+```
+
+> 一个经验法则：**RAG 系统出问题，70% 是检索环节，20% 是文档解析，10% 是 LLM 生成。** 排查问题时从检索开始（检索结果是否相关？），再看文档解析（原文是否完整提取？），最后看 LLM（prompt 是否正确？）。
 
 ---
 
