@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import http from 'http';
+import os from 'os';
 import { execSync } from 'child_process';
 
 // 清除系统代理 — 直连下载
@@ -9,14 +10,48 @@ for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_
   process.env[v] = '';
 }
 
+const PLATFORM = os.platform();   // 'win32' | 'darwin' | 'linux'
+const ARCH = os.arch();           // 'x64' | 'arm64'
+
 const MODELS_DIR = path.resolve(process.cwd(), 'models');
 const LLM_DIR = path.join(MODELS_DIR, 'llm');
 const BIN_DIR = path.resolve(process.cwd(), 'bin');
 
 // llama.cpp release to use — pin for stability
 const LLAMA_CPP_TAG = 'b9263';
-const LLAMA_ZIP = `llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip`;
-const LLAMA_URL = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/${LLAMA_ZIP}`;
+
+function getLlamaBinaryInfo(): { url: string; zipName: string; exeName: string } {
+  const base = 'https://github.com/ggml-org/llama.cpp/releases/download';
+
+  if (PLATFORM === 'win32') {
+    return {
+      url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip`,
+      zipName: `llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip`,
+      exeName: 'llama-server.exe',
+    };
+  }
+
+  if (PLATFORM === 'darwin') {
+    // macOS ARM (Apple Silicon M1/M2/M3/M4) vs Intel
+    const isArm = ARCH === 'arm64';
+    const archLabel = isArm ? 'arm64' : 'x64';
+    return {
+      url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-macos-${archLabel}.zip`,
+      zipName: `llama-${LLAMA_CPP_TAG}-bin-macos-${archLabel}.zip`,
+      exeName: 'llama-server',
+    };
+  }
+
+  // Linux x64
+  const linuxArch = ARCH === 'arm64' ? 'arm64' : 'x64';
+  return {
+    url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-${linuxArch}.zip`,
+    zipName: `llama-${LLAMA_CPP_TAG}-bin-ubuntu-${linuxArch}.zip`,
+    exeName: 'llama-server',
+  };
+}
+
+const LLAMA_INFO = getLlamaBinaryInfo();
 
 // HuggingFace 可能不可达，使用 hf-mirror.com 镜像
 const HF_HOST = 'https://hf-mirror.com';
@@ -140,22 +175,38 @@ async function main() {
   ensureDir(BIN_DIR);
 
   // Download llama-server binary
-  const zipPath = path.join(BIN_DIR, LLAMA_ZIP);
-  const serverExe = path.join(BIN_DIR, 'llama-server.exe');
+  const zipPath = path.join(BIN_DIR, LLAMA_INFO.zipName);
+  const serverExe = path.join(BIN_DIR, LLAMA_INFO.exeName);
 
   if (fs.existsSync(serverExe)) {
-    console.log('[跳过] llama-server.exe 已存在');
+    console.log(`[跳过] ${LLAMA_INFO.exeName} 已存在`);
   } else {
-    await download(LLAMA_URL, zipPath, 'llama.cpp binary');
+    console.log(`[平台] ${PLATFORM} ${ARCH} → ${LLAMA_INFO.zipName}`);
+    await download(LLAMA_INFO.url, zipPath, 'llama.cpp binary');
     console.log('[解压] llama.zip...');
-    // Use PowerShell Expand-Archive (Windows native, no extra deps)
-    execSync(
-      `powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${BIN_DIR}' -Force"`,
-      { stdio: 'inherit' }
-    );
-    // The zip contains files directly, no subdirectory in newer releases
-    const candidates = fs.readdirSync(BIN_DIR).filter(f => f.endsWith('.exe'));
+
+    if (PLATFORM === 'win32') {
+      execSync(
+        `powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${BIN_DIR}' -Force"`,
+        { stdio: 'inherit' }
+      );
+    } else {
+      execSync(`unzip -o "${zipPath}" -d "${BIN_DIR}"`, { stdio: 'inherit' });
+    }
+
+    // zip 解压后文件直接在 bin/ 下（无子目录），过滤出可执行文件
+    const isExec = (f: string) => PLATFORM === 'win32' ? f.endsWith('.exe') : f.startsWith('llama-');
+    const candidates = fs.readdirSync(BIN_DIR).filter(isExec);
     console.log(`[解压完成] 找到可执行文件: ${candidates.join(', ')}`);
+
+    // macOS/Linux 上需要给二进制文件加执行权限
+    if (PLATFORM !== 'win32') {
+      for (const f of candidates) {
+        const fp = path.join(BIN_DIR, f);
+        fs.chmodSync(fp, 0o755);
+      }
+    }
+
     fs.unlinkSync(zipPath);
   }
 
@@ -201,12 +252,11 @@ async function main() {
 
   // Verify server binary
   if (!fs.existsSync(serverExe)) {
-    // Search for llama-server.exe in bin directory
     const found = fs.readdirSync(BIN_DIR).find(f => f.toLowerCase().includes('llama-server'));
     if (found) {
       console.log(`\n[就绪] 找到: ${found}`);
     } else {
-      console.error('\n[错误] 未找到 llama-server.exe，请检查 bin/ 目录');
+      console.error(`\n[错误] 未找到 ${LLAMA_INFO.exeName}，请检查 bin/ 目录`);
       process.exit(1);
     }
   }

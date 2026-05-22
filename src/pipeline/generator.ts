@@ -13,12 +13,12 @@ let loadError: string | null = null;
 
 function findLlamaServer(): string {
   const candidates = fs.readdirSync(BIN_DIR);
-  const match = candidates.find(
-    (f) => f.toLowerCase().includes('llama-server') && f.endsWith('.exe')
+  const match = candidates.find((f) =>
+    f.toLowerCase().startsWith('llama-server')
   );
   if (!match) {
     throw new Error(
-      `未找到 llama-server.exe 于 ${BIN_DIR}，请先运行 npm run setup`
+      `未找到 llama-server 于 ${BIN_DIR}，请先运行 npm run setup`
     );
   }
   return path.join(BIN_DIR, match);
