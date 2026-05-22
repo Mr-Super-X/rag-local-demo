@@ -4,13 +4,13 @@
 
 ## 文档导航
 
-| 文档 | 适合 | 预计时间 |
-|------|------|---------|
-| 本文档 (README) | 了解项目概况 + 快速启动 | 5 分钟 |
-| [理解 RAG：从概念到实践](docs/理解RAG-从概念到实践.md) | **所有人**——RAG 是什么、为什么用、核心概念、在线 AI 对比 | 15 分钟 |
-| [从零搭建本地 RAG 知识库](docs/从零搭建本地RAG知识库.md) | **零基础用户**——安装、使用、踩坑速查 | 20 分钟 |
-| [手把手教你从零写一个本地 RAG](docs/手把手教你从零写一个本地RAG.md) | **开发者**——逐行写代码 + 设计原理 + 生产进阶 | 半天 |
-| [RAG 模拟面试问答](docs/RAG模拟面试问答.md) | **面试准备**——基础→工程→生产 27 个问答 | 1 小时 |
+| 文档                                                                | 适合                                                     | 预计时间 |
+| ------------------------------------------------------------------- | -------------------------------------------------------- | -------- |
+| 本文档 (README)                                                     | 了解项目概况 + 快速启动                                  | 5 分钟   |
+| [理解 RAG：从概念到实践](docs/理解RAG-从概念到实践.md)              | **所有人**——RAG 是什么、为什么用、核心概念、在线 AI 对比 | 15 分钟  |
+| [从零搭建本地 RAG 知识库](docs/从零搭建本地RAG知识库.md)            | **零基础用户**——安装、使用、踩坑速查                     | 20 分钟  |
+| [手把手教你从零写一个本地 RAG](docs/手把手教你从零写一个本地RAG.md) | **开发者**——逐行写代码 + 设计原理 + 生产进阶             | 半天     |
+| [RAG 模拟面试问答](docs/RAG模拟面试问答.md)                         | **面试准备**——基础→工程→生产 27 个问答                   | 1 小时   |
 
 > **建议阅读顺序**：理解 RAG（概念）→ 从零搭建（使用）→ 手把手教程（原理）→ 模拟面试（检验）。
 
@@ -66,13 +66,13 @@
 
 ## 环境要求
 
-| 项目 | 要求 |
-|------|------|
-| Node.js | >= 18.0 |
-| 操作系统 | Windows 10/11 x64 |
-| 磁盘空间 | ~1GB（含模型文件 ~480MB） |
-| 内存 | >= 4GB RAM |
-| 网络 | 首次安装时下载模型（后续完全离线） |
+| 项目     | 要求                               |
+| -------- | ---------------------------------- |
+| Node.js  | >= 18.0                            |
+| 操作系统 | Windows 10/11 x64                  |
+| 磁盘空间 | ~1GB（含模型文件 ~480MB）          |
+| 内存     | >= 4GB RAM                         |
+| 网络     | 首次安装时下载模型（后续完全离线） |
 
 ## 快速开始
 
@@ -90,34 +90,34 @@ npm run setup
 npm start
 ```
 
-浏览器打开 **http://localhost:3000**，上传文档即可开始提问。
+浏览器打开 <http://localhost:3000>，上传文档即可开始提问。
 
 ## 技术栈
 
-| 组件 | 技术 | 说明 |
-|------|------|------|
-| 运行时 | Node.js + TypeScript | tsx 直接执行，无需编译 |
-| Web 框架 | Express.js 4.x | HTTP 服务 + 静态文件 |
-| 文档解析 | pdf-parse / mammoth / marked | 纯 JS，零系统依赖 |
-| 文本切分 | 自实现递归字符切分 | 512 token / 64 token overlap |
-| Embedding | @xenova/transformers all-MiniLM-L6-v2 | 384 维，~80MB，纯 CPU |
-| 向量数据库 | @lancedb/lancedb | 嵌入式，本地文件，零配置 |
-| LLM 运行时 | llama.cpp (llama-server) | 预编译二进制，进程隔离 |
-| LLM 模型 | Qwen2.5-0.5B-Instruct Q4_K_M | ~400MB，CPU 推理，中文友好 |
-| 前端 | 纯 HTML/CSS/JS (ES Modules) | 零构建工具，marked 渲染 Markdown |
+| 组件       | 技术                                  | 说明                             |
+| ---------- | ------------------------------------- | -------------------------------- |
+| 运行时     | Node.js + TypeScript                  | tsx 直接执行，无需编译           |
+| Web 框架   | Express.js 4.x                        | HTTP 服务 + 静态文件             |
+| 文档解析   | pdf-parse / mammoth / marked          | 纯 JS，零系统依赖                |
+| 文本切分   | 自实现递归字符切分                    | 512 token / 64 token overlap     |
+| Embedding  | @xenova/transformers all-MiniLM-L6-v2 | 384 维，~80MB，纯 CPU            |
+| 向量数据库 | @lancedb/lancedb                      | 嵌入式，本地文件，零配置         |
+| LLM 运行时 | llama.cpp (llama-server)              | 预编译二进制，进程隔离           |
+| LLM 模型   | Qwen2.5-0.5B-Instruct Q4_K_M          | ~400MB，CPU 推理，中文友好       |
+| 前端       | 纯 HTML/CSS/JS (ES Modules)           | 零构建工具，marked 渲染 Markdown |
 
 > **选型原则**：零外部服务依赖、纯 JS/TS 生态、模型总体积 ≤ 500MB、CPU 友好。详细技术选型对比见[手把手教程 §0.2](docs/手把手教你从零写一个本地RAG.md)。
 
 ## 配置
 
-| 参数 | 默认值 | 位置 | 说明 |
-|------|--------|------|------|
-| 服务端口 | 3000 | 环境变量 `PORT` | `set PORT=8080 && npm start` |
-| 检索 Top-K | 5 | `src/routes/chat.ts` | 检索返回的最大结果数 |
-| 相似度阈值 | 0.5 | `src/pipeline/retriever.ts` | 低于此值的结果被过滤 |
-| Chunk 大小 | 512 token | `src/pipeline/chunker.ts` | 文本切分粒度 |
-| Chunk 重叠 | 64 token | `src/pipeline/chunker.ts` | 相邻块重叠量 |
-| LLM 模型 | qwen2.5-0.5b | `src/pipeline/generator.ts` | 可替换为任意 GGUF 模型 |
+| 参数       | 默认值       | 位置                        | 说明                         |
+| ---------- | ------------ | --------------------------- | ---------------------------- |
+| 服务端口   | 3000         | 环境变量 `PORT`             | `set PORT=8080 && npm start` |
+| 检索 Top-K | 5            | `src/routes/chat.ts`        | 检索返回的最大结果数         |
+| 相似度阈值 | 0.5          | `src/pipeline/retriever.ts` | 低于此值的结果被过滤         |
+| Chunk 大小 | 512 token    | `src/pipeline/chunker.ts`   | 文本切分粒度                 |
+| Chunk 重叠 | 64 token     | `src/pipeline/chunker.ts`   | 相邻块重叠量                 |
+| LLM 模型   | qwen2.5-0.5b | `src/pipeline/generator.ts` | 可替换为任意 GGUF 模型       |
 
 ## 限制与已知问题
 
