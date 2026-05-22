@@ -223,8 +223,23 @@ npm start
 | 文本切分 | 递归字符切分（512 token/块） | 把长文档切成小块，提高检索精度 |
 | 向量化 | all-MiniLM-L6-v2（384 维） | 把文字映射到数学空间，含义相近的向量也相近 |
 | 向量数据库 | LanceDB（嵌入式，零配置） | 存向量 + 做相似度搜索 |
-| LLM 推理 | llama-server.exe + Qwen2.5-0.5B | 接收 Prompt，生成回答 |
+| LLM 推理 | llama-server + Qwen2.5-0.5B | 接收 Prompt，生成回答 |
 | 前端渲染 | marked（Markdown → HTML） | 代码高亮、标题、列表视觉呈现 |
+
+> **llama-server 和 GGUF 模型文件是什么关系？**
+>
+> 用一句话理解：**llama-server 是"游戏机"，GGUF 模型文件是"游戏卡带"**——一个负责跑，一个负责装知识。
+>
+> | | llama-server（推理引擎） | GGUF 模型文件 |
+> |---|---|---|
+> | **是什么** | C++ 编译出的可执行程序 | `.gguf` 格式的大文件 (~400MB) |
+> | **包含什么** | Transformer 计算逻辑、内存管理、HTTP 服务 | 模型的全部权重参数（数十亿个浮点数） |
+> | **能独立工作吗** | 不能——没有模型文件就是空壳 | 不能——只是数据，无法自己跑起来 |
+> | **类比** | Python 解释器 | `.py` 脚本文件 |
+>
+> 启动时，`generator.ts` 执行 `spawn('llama-server', ['-m', 'qwen2.5-0.5b-q4_k_m.gguf', ...])`，把模型文件"喂给"引擎。llama-server 加载权重后在 8080 端口暴露一个 OpenAI 兼容的 HTTP API，项目中的代码通过 `fetch('http://127.0.0.1:8080/v1/chat/completions')` 调用它做推理。
+>
+> 这样设计的好处是**引擎和模型解耦**：想换 Llama-3 只需更换 `models/llm/` 下的 `.gguf` 文件，llama-server 不用动；Mac 和 Windows 用不同的 llama-server 二进制，但加载同一个 `.gguf` 文件。
 
 **数据存在哪？**
 
