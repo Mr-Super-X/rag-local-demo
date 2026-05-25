@@ -20,33 +20,32 @@ const BIN_DIR = path.resolve(process.cwd(), 'bin');
 // llama.cpp release to use — pin for stability
 const LLAMA_CPP_TAG = 'b9263';
 
-function getLlamaBinaryInfo(): { url: string; zipName: string; exeName: string } {
+function getLlamaBinaryInfo(): { url: string; archiveName: string; exeName: string } {
   const base = 'https://github.com/ggml-org/llama.cpp/releases/download';
 
   if (PLATFORM === 'win32') {
     return {
       url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip`,
-      zipName: `llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip`,
+      archiveName: `llama-${LLAMA_CPP_TAG}-bin-win-cpu-x64.zip`,
       exeName: 'llama-server.exe',
     };
   }
 
   if (PLATFORM === 'darwin') {
-    // macOS ARM (Apple Silicon M1/M2/M3/M4) vs Intel
     const isArm = ARCH === 'arm64';
     const archLabel = isArm ? 'arm64' : 'x64';
     return {
-      url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-macos-${archLabel}.zip`,
-      zipName: `llama-${LLAMA_CPP_TAG}-bin-macos-${archLabel}.zip`,
+      url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-macos-${archLabel}.tar.gz`,
+      archiveName: `llama-${LLAMA_CPP_TAG}-bin-macos-${archLabel}.tar.gz`,
       exeName: 'llama-server',
     };
   }
 
-  // Linux x64
+  // Linux
   const linuxArch = ARCH === 'arm64' ? 'arm64' : 'x64';
   return {
-    url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-${linuxArch}.zip`,
-    zipName: `llama-${LLAMA_CPP_TAG}-bin-ubuntu-${linuxArch}.zip`,
+    url: `${base}/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-${linuxArch}.tar.gz`,
+    archiveName: `llama-${LLAMA_CPP_TAG}-bin-ubuntu-${linuxArch}.tar.gz`,
     exeName: 'llama-server',
   };
 }
@@ -175,26 +174,26 @@ async function main() {
   ensureDir(BIN_DIR);
 
   // Download llama-server binary
-  const zipPath = path.join(BIN_DIR, LLAMA_INFO.zipName);
+  const archivePath = path.join(BIN_DIR, LLAMA_INFO.archiveName);
   const serverExe = path.join(BIN_DIR, LLAMA_INFO.exeName);
 
   if (fs.existsSync(serverExe)) {
     console.log(`[跳过] ${LLAMA_INFO.exeName} 已存在`);
   } else {
-    console.log(`[平台] ${PLATFORM} ${ARCH} → ${LLAMA_INFO.zipName}`);
-    await download(LLAMA_INFO.url, zipPath, 'llama.cpp binary');
-    console.log('[解压] llama.zip...');
+    console.log(`[平台] ${PLATFORM} ${ARCH} → ${LLAMA_INFO.archiveName}`);
+    await download(LLAMA_INFO.url, archivePath, 'llama.cpp binary');
+    console.log('[解压] llama archive...');
 
     if (PLATFORM === 'win32') {
       execSync(
-        `powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${BIN_DIR}' -Force"`,
+        `powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${BIN_DIR}' -Force"`,
         { stdio: 'inherit' }
       );
     } else {
-      execSync(`unzip -o "${zipPath}" -d "${BIN_DIR}"`, { stdio: 'inherit' });
+      execSync(`tar -xzf "${archivePath}" -C "${BIN_DIR}"`, { stdio: 'inherit' });
     }
 
-    // zip 解压后文件直接在 bin/ 下（无子目录），过滤出可执行文件
+    // 过滤出可执行文件 (Windows: .exe 后缀; macOS/Linux: llama- 前缀)
     const isExec = (f: string) => PLATFORM === 'win32' ? f.endsWith('.exe') : f.startsWith('llama-');
     const candidates = fs.readdirSync(BIN_DIR).filter(isExec);
     console.log(`[解压完成] 找到可执行文件: ${candidates.join(', ')}`);
@@ -207,7 +206,7 @@ async function main() {
       }
     }
 
-    fs.unlinkSync(zipPath);
+    fs.unlinkSync(archivePath);
   }
 
   // Download LLM model
