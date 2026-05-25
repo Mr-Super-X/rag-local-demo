@@ -52,12 +52,17 @@ function getLlamaBinaryInfo(): { url: string; archiveName: string; exeName: stri
 
 const LLAMA_INFO = getLlamaBinaryInfo();
 
-// HuggingFace 可能不可达，使用 hf-mirror.com 镜像
-const HF_HOST = 'https://hf-mirror.com';
-
-const MODEL_URL =
-  `${HF_HOST}/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf`;
+// 多源下载：镜像优先（国内快），失败回退直连
+const MODEL_SOURCES = [
+  'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf',
+  'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf',
+];
 const MODEL_FILENAME = 'qwen2.5-0.5b-q4_k_m.gguf';
+
+const EMBEDDING_SOURCES = [
+  'https://hf-mirror.com',
+  'https://huggingface.co',
+];
 
 // Embedding 模型: all-MiniLM-L6-v2 (Xenova/transformers.js ONNX 格式)
 const EMBEDDING_DIR = path.join(MODELS_DIR, 'embedding', 'Xenova', 'all-MiniLM-L6-v2');
@@ -90,11 +95,14 @@ function validateGGUF(filePath: string): boolean {
   }
 }
 
-function download(url: string, dest: string, label: string, maxRedirects = 10): Promise<void> {
+function download(
+  url: string, dest: string, label: string, maxRedirects = 10, maxRetries = 5
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    console.log(`[下载] ${label} (无进度条，~400MB 请耐心等待)...`);
+    const hostname = new URL(url).hostname;
+    console.log(`[下载] ${label} ← ${hostname} (无进度条，~400MB 请耐心等待)...`);
 
-    const doRequest = (reqUrl: string, redirectsLeft: number, retriesLeft = 3) => {
+    const doRequest = (reqUrl: string, redirectsLeft: number, attempt: number) => {
       const file = fs.createWriteStream(dest);
       const transport = reqUrl.startsWith('https') ? https : http;
       const req = transport.get(reqUrl, {
@@ -121,7 +129,7 @@ function download(url: string, dest: string, label: string, maxRedirects = 10): 
           }
           file.close();
           res.resume();
-          doRequest(location, redirectsLeft - 1, retriesLeft);
+          doRequest(location, redirectsLeft - 1, attempt);
           return;
         }
 
@@ -142,14 +150,28 @@ function download(url: string, dest: string, label: string, maxRedirects = 10): 
           try { fs.unlinkSync(dest); } catch {}
           reject(err);
         });
+        res.on('error', (err) => {
+          file.close();
+          try { fs.unlinkSync(dest); } catch {}
+          const code = (err as NodeJS.ErrnoException).code;
+          if (attempt < maxRetries && isRetryableError(code)) {
+            const delay = backoff(attempt);
+            console.log(`  响应流中断 (${code})，${delay / 1000}s 后第 ${attempt + 1}/${maxRetries} 次重试...`);
+            setTimeout(() => doRequest(reqUrl, maxRedirects, attempt + 1), delay);
+            return;
+          }
+          reject(err);
+        });
       });
 
       req.on('error', (err) => {
         file.close();
         try { fs.unlinkSync(dest); } catch {}
-        if (retriesLeft > 0 && (err as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
-          console.log(`  连接超时，重试中... (剩余 ${retriesLeft} 次)`);
-          setTimeout(() => doRequest(reqUrl, redirectsLeft, retriesLeft - 1), 2000);
+        const code = (err as NodeJS.ErrnoException).code;
+        if (attempt < maxRetries && isRetryableError(code)) {
+          const delay = backoff(attempt);
+          console.log(`  网络错误 (${code})，${delay / 1000}s 后第 ${attempt + 1}/${maxRetries} 次重试...`);
+          setTimeout(() => doRequest(reqUrl, maxRedirects, attempt + 1), delay);
           return;
         }
         reject(err);
@@ -162,8 +184,34 @@ function download(url: string, dest: string, label: string, maxRedirects = 10): 
       });
     };
 
-    doRequest(url, maxRedirects);
+    doRequest(url, maxRedirects, 0);
   });
+}
+
+function isRetryableError(code: string | undefined): boolean {
+  if (!code) return false;
+  return ['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE'].includes(code);
+}
+
+function backoff(attempt: number): number {
+  return Math.min(2000 * Math.pow(2, attempt), 60000); // 2s, 4s, 8s, 16s, 32s, 60s cappped
+}
+
+async function downloadWithFallback(
+  urls: string[], dest: string, label: string
+): Promise<void> {
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      await download(urls[i], dest, i === 0 ? label : `${label} (源 ${i + 1})`);
+      return;
+    } catch (err) {
+      if (i < urls.length - 1) {
+        console.log(`  源 ${i + 1} 失败 (${(err as Error).message})，尝试下一个源...`);
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 async function main() {
@@ -225,7 +273,7 @@ async function main() {
   }
 
   if (needDownload) {
-    await download(MODEL_URL, modelPath, 'Qwen2.5-0.5B Q4_K_M');
+    await downloadWithFallback(MODEL_SOURCES, modelPath, 'Qwen2.5-0.5B Q4_K_M');
     if (!validateGGUF(modelPath)) {
       console.error('\n[错误] 下载的模型文件校验失败，可能是网络传输中断');
       console.error('请删除 models/llm/ 下的文件后重试 npm run setup');
@@ -245,7 +293,10 @@ async function main() {
       console.log(`[跳过] ${file}`);
       continue;
     }
-    await download(`${HF_HOST}/${EMBEDDING_MODEL}/resolve/main/${file}`, dest, file);
+    const urls = EMBEDDING_SOURCES.map(
+      (host) => `${host}/${EMBEDDING_MODEL}/resolve/main/${file}`
+    );
+    await downloadWithFallback(urls, dest, file);
   }
   console.log('[Embedding] 模型文件下载完成');
 
