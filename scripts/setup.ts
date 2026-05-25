@@ -241,20 +241,39 @@ async function main() {
       execSync(`tar -xzf "${archivePath}" -C "${BIN_DIR}"`, { stdio: 'inherit' });
     }
 
-    // 过滤出可执行文件 (Windows: .exe 后缀; macOS/Linux: llama- 前缀)
-    const isExec = (f: string) => PLATFORM === 'win32' ? f.endsWith('.exe') : f.startsWith('llama-');
-    const candidates = fs.readdirSync(BIN_DIR).filter(isExec);
-    console.log(`[解压完成] 找到可执行文件: ${candidates.join(', ')}`);
+    // 处理 tar.gz 可能产生的子目录 (macOS/Linux 常见)
+    // 例如: bin/llama-b9263/llama-server → 需要把文件移到 bin/ 下
+    const entries = fs.readdirSync(BIN_DIR);
+    const subDirs = entries.filter((f) => {
+      const fp = path.join(BIN_DIR, f);
+      return fs.statSync(fp).isDirectory() && f.startsWith('llama-');
+    });
+    for (const dir of subDirs) {
+      const dirPath = path.join(BIN_DIR, dir);
+      const children = fs.readdirSync(dirPath);
+      for (const child of children) {
+        const src = path.join(dirPath, child);
+        const dst = path.join(BIN_DIR, child);
+        fs.renameSync(src, dst);
+      }
+      fs.rmdirSync(dirPath);
+    }
 
     // macOS/Linux 上需要给二进制文件加执行权限
     if (PLATFORM !== 'win32') {
-      for (const f of candidates) {
+      for (const f of fs.readdirSync(BIN_DIR)) {
         const fp = path.join(BIN_DIR, f);
-        fs.chmodSync(fp, 0o755);
+        if (fs.statSync(fp).isFile() && f.startsWith('llama-')) {
+          fs.chmodSync(fp, 0o755);
+        }
       }
     }
 
     fs.unlinkSync(archivePath);
+    const exeFiles = fs.readdirSync(BIN_DIR).filter(
+      (f) => PLATFORM === 'win32' ? f.endsWith('.exe') : f.startsWith('llama-server')
+    );
+    console.log(`[解压完成] 找到可执行文件: ${exeFiles.join(', ')}`);
   }
 
   // Download LLM model
