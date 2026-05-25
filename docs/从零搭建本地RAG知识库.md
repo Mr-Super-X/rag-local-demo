@@ -93,7 +93,7 @@ npm run setup
 
 > **小知识**：Qwen2.5-0.5B 的文件后缀是 `.gguf`——这是一种模型文件格式。下载完成后脚本会自动校验文件的"魔数"（文件头 4 个字节是否是 GGUF），确保文件没有在传输中损坏。
 
-> **网络问题？** 如果报 `ECONNREFUSED 127.0.0.1:443` 或 `ETIMEDOUT`，通常是系统代理（翻墙工具等）干扰了下载。脚本已做了自动清代理 + 切换国内镜像（hf-mirror.com）+ 超时重试 3 次的处理。如果还是失败，见第五章"网络问题"。
+> **网络问题？** 如果报 `ECONNREFUSED` 或 `ETIMEDOUT` 等网络错误，通常是系统代理（翻墙工具等）干扰了下载。脚本已做了自动清代理 + 双源下载（hf-mirror → HuggingFace 直连）+ 指数退避重试（最多 5 次）。如果还是失败，见第五章"网络问题"。
 
 下载成功后会看到：
 ```
@@ -162,7 +162,7 @@ npm start
 |------|------|------|
 | `npm install` 卡在 `sharp` | sharp 需从 GitHub 下载，国内慢 | 用 `npm install --ignore-scripts` 然后 `npm rebuild sharp onnxruntime-node` |
 | `npm run setup` 报 `ECONNREFUSED 127.0.0.1:443` | 系统代理干扰 | 重启命令行窗口再试；脚本已自动清代理 |
-| `npm run setup` 报 `ETIMEDOUT` | 某个 CDN 节点连不上 | 重试即可（脚本自动重试 3 次，每次可能换不同节点） |
+| `npm run setup` 报 `ETIMEDOUT` / `ECONNRESET` 等网络错误 | 镜像节点连不上或连接中断 | 脚本自动指数退避重试（最多 5 次），且自动切换 hf-mirror → HuggingFace 直连 |
 | 模型下载后校验失败 | 下载中断导致文件损坏 | 删除 `models/llm/` 下的 `.gguf` 文件，重新 `npm run setup` |
 
 ### 启动问题

@@ -121,7 +121,7 @@ npm start
 
 ## 限制与已知问题
 
-- **仅 Windows x64**：llama-server 二进制为 Windows 版本。macOS/Linux 需替换二进制
+- **跨平台**：支持 Windows / macOS / Linux。`npm run setup` 自动检测平台下载对应二进制
 - **扫描版 PDF 不支持**：依赖文字提取，图片型 PDF 会返回解析错误
 - **小模型回答质量有限**：0.5B 参数仅适合演示。换 Qwen2.5-1.5B（~1.5GB）质量明显提升
 - **首次启动较慢**：模型加载需 10-30 秒
