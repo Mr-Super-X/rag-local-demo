@@ -51,7 +51,7 @@
 
 **瓶颈 1：单机单进程**
 
-Express 是单线程事件循环，上传一个大文件做 Embedding（CPU 密集计算）时，其他请求全部阻塞。10 个用户同时上传 → 第 11 个用户直接超时。
+Express 本身是单线程事件循环。虽然 ONNX runtime 在 worker thread 中运行不至于阻塞事件循环，但 Embedding（CPU 密集型矩阵运算）会吃满 CPU。10 个用户同时上传 → CPU 占满 → 所有请求响应延迟急剧上升，第 11 个用户可能直接超时。
 
 **瓶颈 2：嵌入式向量库**
 
@@ -212,6 +212,8 @@ LLM 上下文只有检索到的文档片段 + 当前问题。用户追问"那个
 
 三者互补，用 RRF 算法融合排序——不依赖分数绝对值，只考虑"排第几"，天然适应不同量纲的分数。
 
+> **注意**：查询意图分析新增了一次额外的 LLM 调用，会增加 200-500ms 延迟。在对延迟敏感的场景中，可以用 NER 模型（如 HanLP）快速提取实体（关键词/时间/组织名）替代 LLM 做意图解析，延迟可控制在 10ms 以内。
+
 **Reranker 为什么重要**：
 
 向量模型是"双塔架构"——query 和 document 各自独立编码再算相似度。信息在交叉之前没有交互。Reranker（Cross-Encoder）是把 `[query, document]` 拼接后一起过模型，准确率高很多，但速度慢（每条都要推理一次）。
@@ -336,7 +338,7 @@ LLM 上下文只有检索到的文档片段 + 当前问题。用户追问"那个
 |------|--------|--------|----------|---------------|
 | **分布式** | ✅ 原生 | ✅ 原生 | ✅ 原生 | ✅ 原生 |
 | **混合搜索** | ✅ 向量+标量 | ✅ 向量+标量+全文 | ✅ 向量+标量+BM25 | ✅ 向量+全文 |
-| **GPU 索引加速** | ✅ | ✅ | ❌ | ❌ |
+| **GPU 索引加速** | ✅ | ❌ | ❌ | ❌ |
 | **十亿级扩展** | ✅ | ✅ | ⚠️ 需调优 | ✅ |
 | **社区活跃度** | GitHub 30k+ stars | GitHub 10k+ stars | GitHub 12k+ stars | GitHub 70k+ stars |
 | **运维复杂度** | 高（需 etcd + MinIO） | 低（单二进制） | 中 | 中-高 |
@@ -371,6 +373,140 @@ LLM 上下文只有检索到的文档片段 + 当前问题。用户追问"那个
 | Embedding 模型用 OpenAI API | 数据出内网，延迟不可控，成本不可预测 | 本地部署 BGE |
 | 关系数据库存向量 (pgvector) | 百万级可以，千万级以上性能急剧下降 | Milvus / Qdrant |
 | 无 Reranker 直接返回 | 相似度分数不可跨查询比较，排序噪音大 | 粗筛 50 → Reranker → Top-5 |
+
+### 4.4 深度分析：为什么不推荐 LangChain 做生产编排
+
+> 以下展开说明 §4.3 表中"用 LangChain 做生产编排"这一条。
+
+#### LangChain 是什么
+
+LangChain 是一个 LLM 应用开发框架，核心思路是把 LLM 相关的常见模式封装成可复用的积木：
+
+```
+不用 LangChain：                      用 LangChain：
+
+自己写 prompt 拼接                     ChatPromptTemplate
+自己写 HTTP 调用                       ChatOpenAI / ChatAnthropic
+自己写检索→拼接→调 LLM 的编排代码      Chain / LCEL
+自己管理对话历史                        ConversationBufferMemory
+自己写 PDF 解析 + 切分 + 向量化         Document Loaders + Text Splitters
+```
+
+#### 五个不推荐理由
+
+**1. 抽象层太重——调试地狱**
+
+LangChain 在简单的 HTTP 调用外面包了太多层：
+
+```
+你的代码
+  → LangChain Chain
+    → LangChain LLM Wrapper
+      → LangChain Callback Handler
+        → 底层 HTTP 请求
+```
+
+当 LLM 返回了奇怪的结果，你想看"到底发了什么 prompt？服务端返回了什么 raw response？"——中间层把请求和响应都加工过，日志里看不到原始数据。出问题时很难定位到底是 prompt 写错了、检索结果不对、还是模型本身的问题。
+
+**2. 隐藏的性能损耗**
+
+LangChain 的 `Chain` 默认做了很多隐式操作——自动重试、自动解析输出、callback 触发。一个简单的 RAG 问答，用 LangChain 可能比直接裸写 `fetch` / `requests` 多 30-50% 的延迟。在生产环境的高 QPS 场景下，这些隐性开销会急剧放大。
+
+**3. 版本迭代过快，API 不稳定**
+
+LangChain 从 0.0.x 到 0.3.x，几乎每个小版本都有 breaking change。生产系统依赖一个 API 还在剧烈变化的框架是危险的——`pip install --upgrade` 可能导致系统大面积报错。
+
+**4. 隐藏了不该隐藏的细节**
+
+这一点最关键。LangChain 的口号是"让 LLM 开发变简单"，但它把太多关键细节藏起来了：
+
+```python
+# LangChain 的"魔法"——一行搞定检索问答
+qa_chain = RetrievalQA.from_chain_type(llm, retriever=vectorstore.as_retriever())
+result = qa_chain.run("什么是 RAG？")
+```
+
+看起来很美。但当检索效果不好时，你完全不知道：到底检索到了哪几个 chunk？它们的相似度分数是多少？Prompt 最终拼出来是什么样子？有没有触发自动重试？——而这些恰恰是**生产环境最需要搞清楚**的东西。
+
+**5. LangGraph 和 LCEL 有所改善——但包袱还在**
+
+LangChain 团队后来推出了 LangGraph（状态机编排）和 LCEL（声明式链式调用），试图解决上述问题。它们比旧版 Chain 好很多，但：
+- 学习曲线不低（LangGraph 本质是自建了一套 DSL）
+- 遗留代码和教程大量使用旧 API，社区生态割裂
+- 裸写代码仍然比学这套 DSL 更直观
+
+#### 企业项目推荐的替代方案
+
+```
+简单场景（80%）：直接裸写
+    requests.post(LLM_API) + 自己拼 prompt + 自己管检索结果
+    → 100 行代码，完全可控，调试透明，零额外延迟
+
+复杂编排：LlamaIndex
+    → 比 LangChain 轻量，专注 RAG 场景，API 更稳定
+    → 但仍然有抽象层损耗，建完 MVP 后评估是否值得保留
+
+极复杂工作流：自建轻量编排 + 通用状态机
+    → 用你熟悉的工具（Celery / Temporal / AWS Step Functions）
+    → 不要引入 LLM 专属框架来管通用业务流程
+```
+
+> **一句话**：LangChain 让 Demo 的 100 行代码变成 10 行——这 10 行在 Demo 阶段非常高效。但当系统要上生产时，你需要的是"看得见每一行在干什么"，而 LangChain 给你的是"相信我，我帮你处理好了"。
+
+### 4.5 深度分析：Ollama 是什么，能用在哪
+
+> 文档 §3.2.3 和 §4.1 多处提到 Ollama，以下展开说明它的定位和边界。
+
+#### Ollama 是什么
+
+Ollama 是一个在本地一键运行大模型的工具。核心价值：**把"下载模型 + 配置环境 + 启动推理服务"三步压缩成一条命令。**
+
+```
+不用 Ollama：                          用 Ollama：
+
+1. 下载 GGUF 模型文件（手动找 URL）       ollama pull qwen2.5:7b
+2. 自己编译或下载 llama.cpp
+3. 手写启动命令：
+   llama-server -m model.gguf --port 8080
+4. 自己管理进程（重启、日志、端口）
+                                          ollama run qwen2.5:7b
+                                          搞定了。API 在 localhost:11434，
+                                          和 OpenAI 格式兼容。
+```
+
+#### Ollama 做了什么
+
+| 能力 | 说明 |
+|------|------|
+| **模型管理** | `ollama pull` 下载、`ollama list` 查看、`ollama rm` 删除。类似 Docker 管理镜像的方式管模型 |
+| **一键推理** | `ollama run qwen2.5:7b` 启动后直接在终端对话，或后台作为 API 服务运行 |
+| **OpenAI 兼容 API** | 自动暴露 `localhost:11434/v1/chat/completions`，现有调 OpenAI 的代码改个 URL 就能用 |
+| **Modelfile** | 类似 Dockerfile，可在基础模型上叠加 System Prompt、调整参数、打包分发 |
+
+#### 它和 llama.cpp 的关系
+
+```
+Ollama
+  └── 底层 = llama.cpp（推理引擎，本项目 Demo 也在用）
+  └── 上层 = 模型管理 + API 封装 + 进程守护
+  └── 本质 = llama.cpp 的"用户体验层"
+```
+
+本项目的 Demo 就是手动做了 Ollama 自动做的事：下载 GGUF → spawn llama-server → 调 HTTP API。Ollama 把这个流程对用户透明化了。
+
+#### 适用场景判断
+
+| 场景 | 结论 | 原因 |
+|------|------|------|
+| 个人本地跑模型 | **非常适合** | 零配置，一条命令 |
+| 小团队内网共享 | **适合** | 局域网部署，Docker 一行拉起来 |
+| 开发调试阶段 | **非常适合** | `ollama pull` 快速切换不同模型做对比测试 |
+| 企业高并发生产 | **不够** | 没有连续批处理（continuous batching），多个请求只能排队，吞吐量远低于 vLLM |
+| 需要 GPU 显存优化 | **不够** | 不支持 PagedAttention，同样显存下并发能力远弱于 vLLM |
+
+#### 一句话总结
+
+Ollama 追求的是**简单**，vLLM 追求的是**吞吐**。选哪个取决于你在乎什么——个人开发选 Ollama，生产集群选 vLLM。两者底层是同一个推理引擎（llama.cpp），上层定位不同。
 
 ---
 
@@ -454,6 +590,8 @@ LLM 上下文只有检索到的文档片段 + 当前问题。用户追问"那个
 | 对象存储 | 5TB | — | ~¥500/月 |
 | 合计 | | | **~¥13,000/月** (约 $1,800) |
 
+> **说明**：以上为国内二线云厂商（如 UCloud、AutoDL）的保守估价。一线云（阿里云/AWS）同等配置约 ¥20,000-30,000/月。实际成本取决于 GPU 型号（A10/L20/L40S）、是否需要多可用区、存储是否做冗余。
+
 如果使用云端 API (DeepSeek) 替代自建 GPU，GPU 成本可降到 ~¥3000/月（按 token 计费），但数据需出内网。
 
 ---
@@ -519,7 +657,7 @@ LLM 上下文窗口:          32768 token  (Qwen2.5-7B)
 |---------|------|---------|--------|
 | **检索质量** | Recall@5 | 正确答案是否在 Top-5 结果中 | ≥ 90% |
 | **检索质量** | MRR (Mean Reciprocal Rank) | 第一个相关结果的排名倒数平均值 | ≥ 0.8 |
-| **生成质量** | Faithfulness (忠实度) | 回答是否 100% 基于检索到的事实 | ≥ 95% |
+| **生成质量** | Faithfulness (忠实度) | 回答是否 100% 基于检索到的事实 | ≥ 85%（当前 LLM 水平下 95% 极难稳定达到） |
 | **生成质量** | Answer Relevance | 回答是否切题 | ≥ 85% |
 | **系统性能** | 端到端延迟 P99 | 从发问题到回答完成的整体耗时 | < 5s |
 | **系统性能** | 首 Token 延迟 P99 | 用户看到第一个字的等待时间 | < 1s |
